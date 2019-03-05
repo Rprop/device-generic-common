@@ -17,6 +17,7 @@
 # Common packages for Android-x86 platform.
 
 PRODUCT_PACKAGES := \
+    AnalyticsService \
     BasicSmsReceiver \
     Development \
     Galaxy4 \
@@ -31,7 +32,9 @@ PRODUCT_PACKAGES := \
     PinyinIME \
     Provision \
     RSSReader \
+    Taskbar \
     VisualizationWallpapers \
+    WallpaperPicker \
     camera.x86 \
     chat \
     com.android.future.usb.accessory \
@@ -48,9 +51,8 @@ PRODUCT_PACKAGES := \
     make_ext4fs \
     parted \
     power.x86 \
-    powerbtnd \
+    rtk_hciattach \
     scp \
-    sensors.hsb \
     sftp \
     ssh \
     sshd \
@@ -62,6 +64,7 @@ PRODUCT_PACKAGES := \
 PRODUCT_PACKAGES += \
     libwpa_client \
     hostapd \
+    wificond \
     wpa_supplicant \
     wpa_supplicant.conf \
 
@@ -80,7 +83,19 @@ PRODUCT_PACKAGES += \
     resize2fs \
     tune2fs \
 
+PRODUCT_PACKAGES += \
+    btattach \
+    hciconfig \
+    hcitool \
+
+# Stagefright FFMPEG plugins
+PRODUCT_PACKAGES += \
+    i965_drv_video \
+    libffmpeg_extractor \
+    libffmpeg_omx \
+    media_codecs_ffmpeg.xml
+
 # Third party apps
 PRODUCT_PACKAGES += \
-    CMFileManager \
     Eleven \
+    TSCalibration2 \

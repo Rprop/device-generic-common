@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2013-2015 The Android-x86 Open Source Project
+# Copyright (C) 2013-2018 The Android-x86 Open Source Project
 #
 # License: GNU Public License v2 or later
 #
@@ -8,6 +8,11 @@ function set_property()
 {
 	setprop "$1" "$2"
 	[ -n "$DEBUG" ] && echo "$1"="$2" >> /dev/x86.prop
+}
+
+function set_prop_if_empty()
+{
+	[ -z "$(getprop $1)" ] && set_property "$1" "$2"
 }
 
 function init_misc()
@@ -21,6 +26,10 @@ function init_misc()
 
 	# in case no cpu governor driver autoloads
 	[ -d /sys/devices/system/cpu/cpu0/cpufreq ] || modprobe acpi-cpufreq
+
+	# enable sdcardfs if /data is not mounted on tmpfs or 9p
+	mount | grep /data\ | grep -qE 'tmpfs|9p'
+	[ $? -ne 0 ] && modprobe sdcardfs
 }
 
 function init_hal_audio()
@@ -46,8 +55,9 @@ function init_hal_bluetooth()
 	done
 
 	case "$PRODUCT" in
-		T10*TA|HP*Omni*)
+		T10*TA|M80TA|HP*Omni*)
 			BTUART_PORT=/dev/ttyS1
+			set_property hal.bluetooth.uart.proto bcm
 			;;
 		MacBookPro8*)
 			rmmod b43
@@ -65,18 +75,26 @@ function init_hal_bluetooth()
 			modprobe btusb
 			;;
 		*)
-			for bt in $(lsusb -v | awk ' /Class:.E0/ { print $9 } '); do
+			for bt in $(busybox lsusb -v | awk ' /Class:.E0/ { print $9 } '); do
 				chown 1002.1002 $bt && chmod 660 $bt
 			done
-			modprobe btusb
 			;;
 	esac
 
 	if [ -n "$BTUART_PORT" ]; then
 		set_property hal.bluetooth.uart $BTUART_PORT
 		chown bluetooth.bluetooth $BTUART_PORT
-		start btattach:-B$BTUART_PORT
-		log -t hciconfig -p i "`hciconfig`"
+		start btattach
+	fi
+
+	# rtl8723bs bluetooth
+	if dmesg -t | grep -qE '8723bs.*BT'; then
+		TTYSTRING=`dmesg -t | grep -E 'tty.*MMIO' | awk '{print $2}' | head -1`
+		if [ -n "$TTYSTRING" ]; then
+			echo "RTL8723BS BT uses $TTYSTRING for Bluetooth."
+			ln -sf $TTYSTRING /dev/rtk_h5
+			start rtk_hciattach
+		fi
 	fi
 }
 
@@ -97,6 +115,9 @@ function set_drm_mode()
 		ET1602*)
 			drm_mode=1366x768
 			;;
+		VMware*)
+			[ -n "$video" ] && drm_mode=$video
+			;;
 		*)
 			;;
 	esac
@@ -114,19 +135,24 @@ function init_uvesafb()
 			;;
 	esac
 
-	[ "$HWACCEL" = "0" ] && bpp=16 || bpp=32
-	modprobe uvesafb mode_option=${UVESA_MODE:-1024x768}-$bpp ${UVESA_OPTION:-mtrr=3 scroll=redraw}
+	modprobe uvesafb mode_option=${UVESA_MODE:-1024x768}-32 ${UVESA_OPTION:-mtrr=3 scroll=redraw}
 }
 
 function init_hal_gralloc()
 {
 	case "$(cat /proc/fb | head -1)" in
 		*virtiodrmfb)
-#			set_property ro.hardware.hwcomposer drm
-			;&
+			if [ "$HWACCEL" != "0" ]; then
+				set_property ro.hardware.hwcomposer drm
+				set_property ro.hardware.gralloc gbm
+			fi
+			set_prop_if_empty sleep.state none
+			;;
 		0*inteldrmfb|0*radeondrmfb|0*nouveaufb|0*svgadrmfb|0*amdgpudrmfb)
-			set_property ro.hardware.gralloc drm
-			set_drm_mode
+			if [ "$HWACCEL" != "0" ]; then
+				set_property ro.hardware.gralloc drm
+				set_drm_mode
+			fi
 			;;
 		"")
 			init_uvesafb
@@ -157,6 +183,9 @@ function init_hal_power()
 
 	# TODO
 	case "$PRODUCT" in
+		HP*Omni*|OEMB|Surface*3|T10*TA)
+			set_prop_if_empty sleep.state none
+			;;
 		*)
 			;;
 	esac
@@ -227,30 +256,38 @@ function init_hal_sensors()
 			modprobe hdaps
 			hal_sensors=hdaps
 			;;
-		*i7Stylus*)
-			set_property hal.sensors.iio.accel.matrix 1,0,0,0,-1,0,0,0,-1
-			;;
-		*ST70416-6*)
-			set_property hal.sensors.iio.accel.matrix 0,-1,0,-1,0,0,0,0,-1
+		*i7Stylus*|*M80TA*)
+			set_property ro.iio.accel.x.opt_scale -1
 			;;
 		*ONDATablet*)
-			set_property hal.sensors.iio.accel.matrix 0,1,0,1,0,0,0,0,-1
+			set_property ro.iio.accel.order 102
+			set_property ro.iio.accel.x.opt_scale -1
+			set_property ro.iio.accel.y.opt_scale -1
+			;;
+		*ST70416-6*)
+			set_property ro.iio.accel.order 102
+			;;
+		*T10*TA*)
+			set_property ro.iio.accel.y.opt_scale -1
 			;;
 		*)
-			#has_sensors=false
+			has_sensors=false
 			;;
 	esac
 
 	# has iio sensor-hub?
 	if [ -n "`ls /sys/bus/iio/devices/iio:device* 2> /dev/null`" ]; then
 		busybox chown -R 1000.1000 /sys/bus/iio/devices/iio:device*/
-		lsmod | grep -q hid_sensor_accel_3d && hal_sensors=hsb || hal_sensors=iio
+		[ -n "`ls /sys/bus/iio/devices/iio:device*/in_accel_x_raw 2> /dev/null`" ] && has_sensors=true
+		hal_sensors=iio
 	elif lsmod | grep -q lis3lv02d_i2c; then
 		hal_sensors=hdaps
+		has_sensors=true
+	elif [ "$hal_sensors" != "kbd" ]; then
+		has_sensors=${HAS_SENSORS:-true}
 	fi
 
 	set_property ro.hardware.sensors $hal_sensors
-	[ "$hal_sensors" != "kbd" ] && has_sensors=true
 	set_property config.override_forced_orient $has_sensors
 }
 
@@ -340,6 +377,8 @@ function do_netconsole()
 
 function do_bootcomplete()
 {
+	hciconfig | grep -q hci || pm disable com.android.bluetooth
+
 	init_cpu_governor
 
 	[ -z "$(getprop persist.sys.root_access)" ] && setprop persist.sys.root_access 3
@@ -394,24 +433,17 @@ function do_bootcomplete()
 			alsa_amixer -c $c set Headphone on
 			alsa_amixer -c $c set Headphone 100%
 			alsa_amixer -c $c set Speaker 100%
-			alsa_amixer -c $c set Capture 100%
+			alsa_amixer -c $c set Capture 80%
 			alsa_amixer -c $c set Capture cap
 			alsa_amixer -c $c set PCM 100 unmute
 			alsa_amixer -c $c set SPO unmute
-			alsa_amixer -c $c set 'Mic Boost' 3
-			alsa_amixer -c $c set 'Internal Mic Boost' 3
+			alsa_amixer -c $c set IEC958 on
+			alsa_amixer -c $c set 'Mic Boost' 1
+			alsa_amixer -c $c set 'Internal Mic Boost' 1
 		fi
 	done
-}
 
-function do_hci()
-{
-	local hci=`hciconfig | grep ^hci | cut -d: -f1`
-	local btd="`getprop init.svc.bluetoothd`"
-	log -t bluetoothd -p i "$btd ($hci)"
-	if [ -n "`getprop hal.bluetooth.uart`" ]; then
-		[ "`getprop init.svc.bluetoothd`" = "running" ] && hciconfig $hci up
-	fi
+	post_bootcomplete
 }
 
 PATH=/sbin:/system/bin:/system/xbin
@@ -429,9 +461,6 @@ for c in `cat /proc/cmdline`; do
 			eval $c
 			if [ -z "$1" ]; then
 				case $c in
-					HWACCEL=*)
-						set_property debug.egl.hw $HWACCEL
-						;;
 					DEBUG=*)
 						[ -n "$DEBUG" ] && set_property debug.logcat 1
 						;;
@@ -453,9 +482,6 @@ case "$1" in
 		;;
 	bootcomplete)
 		do_bootcomplete
-		;;
-	hci)
-		do_hci
 		;;
 	init|"")
 		do_init
